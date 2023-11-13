@@ -2,13 +2,16 @@ version: "3.9"
 services:
   web:
     build: .
-    command: /app/bin/unpub -d mongodb://mongo:27017/dart_pub
+    command: /app/bin/unpub -d mongodb://mongo:27017/dart_pub -p 80
+    environment:
+      - VIRTUAL_HOST=pub.academy.intern.neusta-ms.de
+      - CERT_NAME=neusta-ms
     links:
       - mongo
     depends_on:
       - mongo
     ports:
-      - "4000:4000"
+      - "80:80"
     networks:
       - mongo
     restart: unless-stopped
