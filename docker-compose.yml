@@ -1,0 +1,22 @@
+version: "3.9"
+services:
+  web:
+    build: .
+    command: /app/bin/unpub -d mongodb://mongo:27017/dart_pub
+    links:
+      - mongo
+    depends_on:
+      - mongo
+    ports:
+      - "4000:4000"
+    networks:
+      - mongo
+    restart: unless-stopped
+   
+  mongo:
+    image: "mongo:4.2"
+    networks:
+      - mongo
+
+networks:
+  mongo:
