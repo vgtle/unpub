@@ -4,8 +4,6 @@ import 'package:collection/collection.dart' show IterableExtension;
 import 'package:shelf/shelf.dart' as shelf;
 import 'package:shelf/shelf_io.dart' as shelf_io;
 import 'package:http/http.dart' as http;
-import 'package:http/io_client.dart';
-import 'package:googleapis/oauth2/v2.dart';
 import 'package:mime/mime.dart';
 import 'package:http_parser/http_parser.dart';
 import 'package:shelf_cors_headers/shelf_cors_headers.dart';
@@ -22,7 +20,17 @@ import 'static/main.dart.js.dart' as main_dart_js;
 
 part 'app.g.dart';
 
+class AuthenticationData {
+  AuthenticationData(
+      {required this.email, required this.token, required this.expires});
+
+  final String email;
+  final String token;
+  final DateTime expires;
+}
+
 class App {
+  final Map<String, AuthenticationData> _authCache = {};
   static const proxyOriginHeader = "proxy-origin";
 
   /// meta information store
@@ -80,7 +88,44 @@ class App {
         }),
       );
 
-  http.Client? _googleapisClient;
+  bool _shouldRefresh(String token) =>
+      !_authCache.containsKey(token) ||
+      _authCache[token]!.expires.isAfter(DateTime.now());
+
+  Future<bool> _isAuthenticated(shelf.Request req) async {
+    var authHeader = req.headers[HttpHeaders.authorizationHeader];
+    if (authHeader == null) return false;
+
+    var token = authHeader;
+    return (await _getAuthenticationData(token)) != null;
+  }
+
+  Future<AuthenticationData?> _getAuthenticationData(String token) async {
+    if (_shouldRefresh(token)) {
+      _authCache.remove(token);
+
+      final res = await http.get(
+        Uri.parse('https://gitlab.neusta-ms.de/api/v4/user'),
+        // Send authorization headers to the backend.
+        headers: {
+          HttpHeaders.authorizationHeader: token,
+        },
+      );
+      if (res.statusCode != 200) return null;
+      final email = jsonDecode(res.body)['email'] as String?;
+      if (email == null) return null;
+      final authData = AuthenticationData(
+        email: email,
+        token: token,
+        expires: DateTime.now().add(
+          Duration(days: 1),
+        ),
+      );
+      _authCache[token] = authData;
+    }
+
+    return _authCache[token];
+  }
 
   String _resolveUrl(shelf.Request req, String reference) {
     if (proxy_origin != null) {
@@ -94,27 +139,17 @@ class App {
   }
 
   Future<String> _getUploaderEmail(shelf.Request req) async {
-    if (overrideUploaderEmail != null) return overrideUploaderEmail!;
-
     var authHeader = req.headers[HttpHeaders.authorizationHeader];
     if (authHeader == null) throw 'missing authorization header';
 
-    var token = authHeader.split(' ').last;
-
-    if (_googleapisClient == null) {
-      if (googleapisProxy != null) {
-        _googleapisClient = IOClient(HttpClient()
-          ..findProxy = (url) => HttpClient.findProxyFromEnvironment(url,
-              environment: {"https_proxy": googleapisProxy!}));
-      } else {
-        _googleapisClient = http.Client();
-      }
+    var token = authHeader;
+    try {
+      final authData = await _getAuthenticationData(token);
+      if (authData == null) throw Exception('Failed to get user information');
+      return authData.email;
+    } catch (err) {
+      throw Exception('Failed to get user email');
     }
-
-    var info =
-        await Oauth2Api(_googleapisClient!).tokeninfo(accessToken: token);
-    if (info.email == null) throw 'fail to get google account email';
-    return info.email!;
   }
 
   Future<HttpServer> serve([String host = '0.0.0.0', int port = 4000]) async {
@@ -135,7 +170,8 @@ class App {
     var name = item.pubspec['name'] as String;
     var version = item.version;
     return {
-      'archive_url': _resolveUrl(req, '/packages/$name/versions/$version.tar.gz'),
+      'archive_url':
+          _resolveUrl(req, '/packages/$name/versions/$version.tar.gz'),
       'pubspec': item.pubspec,
       'version': version,
     };
@@ -163,9 +199,8 @@ class App {
           semver.Version.parse(a.version), semver.Version.parse(b.version));
     });
 
-    var versionMaps = package.versions
-        .map((item) => _versionToJson(item, req))
-        .toList();
+    var versionMaps =
+        package.versions.map((item) => _versionToJson(item, req)).toList();
 
     return _okWithJson({
       'name': name,
@@ -203,6 +238,8 @@ class App {
   @Route.get('/packages/<name>/versions/<version>.tar.gz')
   Future<shelf.Response> download(
       shelf.Request req, String name, String version) async {
+    if (!(await _isAuthenticated(req)))
+      return shelf.Response.forbidden('Unauthorized');
     var package = await metaStore.queryPackage(name);
     if (package == null) {
       return shelf.Response.found(Uri.parse(upstream)
@@ -228,8 +265,7 @@ class App {
   @Route.get('/api/packages/versions/new')
   Future<shelf.Response> getUploadUrl(shelf.Request req) async {
     return _okWithJson({
-      'url': _resolveUrl(req, '/api/packages/versions/newUpload')
-          .toString(),
+      'url': _resolveUrl(req, '/api/packages/versions/newUpload').toString(),
       'fields': {},
     });
   }
@@ -342,9 +378,11 @@ class App {
       await metaStore.addVersion(name, unpubVersion);
 
       // TODO: Upload docs
-      return shelf.Response.found(_resolveUrl(req, '/api/packages/versions/newUploadFinish'));
+      return shelf.Response.found(
+          _resolveUrl(req, '/api/packages/versions/newUploadFinish'));
     } catch (err) {
-      return shelf.Response.found(_resolveUrl(req, '/api/packages/versions/newUploadFinish?error=$err'));
+      return shelf.Response.found(_resolveUrl(
+          req, '/api/packages/versions/newUploadFinish?error=$err'));
     }
   }
 

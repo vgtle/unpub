@@ -6,11 +6,13 @@
     "configurations": [
         {
             "name": "unpub",
-            "cwd": "unpub",
             "request": "launch",
             "type": "dart",
-            "args": ["--database", "mongodb://localhost:27017/dart_pub"],
-            "program": "bin/unpub.dart",
+            "args": [
+                "--database",
+                "mongodb://localhost:27017/dart_pub"
+            ],
+            "program": "unpub/bin/unpub.dart",
         },
         {
             "name": "unpub_aws",
